@@ -18,26 +18,49 @@ OBS recording ────┘   (yt-dlp)   (Whisper)    (chat,    (Gemini) (game
                                               markers)
 ```
 
-## Quick start
+## Quick start (Windows, point and click)
 
-You need **Docker Desktop** ([Windows](https://docs.docker.com/desktop/setup/install/windows-install/) /
-[Mac](https://docs.docker.com/desktop/setup/install/mac-install/)) running, and **git**.
+You need **Docker Desktop** ([download](https://docs.docker.com/desktop/setup/install/windows-install/))
+and **git** (`winget install Git.Git`).
 
 ```powershell
 git clone https://github.com/elyashium/stream-clipper.git
+```
+
+Then open the `stream-clipper` folder and double-click **`Stream Clipper.cmd`**:
+
+![the Stream Clipper window](assets/gui.png)
+
+1. Paste the **Gemini key** ([free](https://aistudio.google.com/app/apikey)) and click **Save keys**.
+2. Click **Install** once. A console window shows the build (several GB, 10–30
+   minutes the first time). An NVIDIA card is detected and used automatically.
+3. Paste the stream's YouTube link and click **Clip this link**, or **Clip a
+   recording...** for an OBS file. A console window follows the job and lists
+   the clips when it ends.
+4. **Open clips folder** for the files, or **Open dashboard** to trim, re-caption
+   and post them.
+
+Status is live in the window (Docker, GPU, pipeline). If Docker Desktop isn't
+running, the buttons start it.
+
+## Command line (Windows, macOS, Linux)
+
+Same thing without the window:
+
+```powershell
 cd stream-clipper
 .\clipper.ps1 setup          # macOS/Linux: ./clipper.sh setup
 ```
 
-`setup` downloads OpenShorts, applies the patch and builds everything. The first
-build downloads several GB and takes 10–30 minutes. It also creates `.env`.
-Open it (`notepad .env`) and paste your key:
+`setup` downloads OpenShorts, applies the patch and builds everything. It also
+creates `.env` (with `USE_GPU=1` if it finds an NVIDIA card). Open it
+(`notepad .env`) and paste your key:
 
 | Key | Needed? | Where |
 |---|---|---|
 | `GEMINI_API_KEY` | **yes** | free at <https://aistudio.google.com/app/apikey> |
 | `UPLOAD_POST_API_KEY` + `UPLOAD_POST_USER` | only for posting | free plan (10 uploads/month) at <https://www.upload-post.com>; connect TikTok/YouTube/Instagram there, `UPLOAD_POST_USER` is that profile's name |
-| `USE_GPU=1` | if you have an NVIDIA card | then run `setup` again to rebuild |
+| `USE_GPU=1` | set by itself when an NVIDIA card is found | change it, then run `setup` again to rebuild |
 
 Then clip a stream:
 
@@ -49,8 +72,11 @@ Then clip a stream:
 
 It prints the pipeline log as it goes and ends with a list of clips, saved to
 `clips\<date>_<title>_<job>\` along with a `clips.txt` of titles and captions.
-Review them in the dashboard at <http://localhost:5175> (edit cuts, captions,
-layout) and post from there, or:
+Review them in the dashboard at <http://localhost:5175/#app> (edit cuts,
+captions, layout) and post from there. Your keys from `.env` are already filled
+in there. Jobs started in the dashboard get copied to `clips\` by
+`.\clipper.ps1 sync` (the window's **Open clips folder** does it for you). Or
+post from the command line:
 
 ```powershell
 .\clipper.ps1 post <job_id> 0 --platforms tiktok,youtube,instagram
@@ -65,11 +91,14 @@ layout) and post from there, or:
 
 | | |
 |---|---|
+| `gui` | the window (same as `Stream Clipper.cmd`) |
 | `setup` | first install, and after changing `USE_GPU` |
 | `start` / `stop` | start or stop the pipeline + dashboard |
+| `open` | open the dashboard |
 | `run <url\|file> [--clips N] [--min S] [--max S]` | clip a stream |
 | `post <job> <n> [--platforms …] [--schedule ISO]` | post clip `n` of a job |
 | `jobs` | list clip folders |
+| `sync` | copy clips of dashboard jobs into `clips/` |
 | `logs` | follow the backend log |
 | `update` | pull this repo and rebuild |
 | `doctor` | check Docker, GPU, keys |
@@ -137,10 +166,26 @@ Tuning knobs live in `.env` (`CHAT_DELAY_SECONDS`, `MIC_AUDIO_TRACK`,
 
 ## Speed
 
-On CPU, OpenShorts processes roughly 1 minute of video per minute, so a 3-hour
-stream takes about 3 hours. Leave it running overnight. With an NVIDIA GPU
-(`USE_GPU=1`), transcription and rendering are several times faster. A 4 GB card
-(GTX 1650) works; the GPU config uses `int8_float16` so the model fits.
+With an NVIDIA card (`USE_GPU=1`, set automatically) everything heavy runs on
+it:
+
+- **Transcription**: NVIDIA Parakeet on CUDA (falls back to Whisper
+  large-v3-turbo for languages outside its 25 European ones), `int8_float16` so
+  it fits a 4 GB card like a GTX 1650.
+- **Decoding, reframing, captions**: NVDEC decode plus OpenShorts' one-pass GPU
+  renderer, then **NVENC** encoding.
+- **One job at a time** gets the whole card; a second one queues.
+
+Other things that keep it quick:
+
+- The dashboard is a static production build behind nginx, not a dev server.
+- Video I/O and model weights live in Docker volumes, not on a slow Windows
+  folder mount. Models download once and survive rebuilds.
+- Local recordings in `recordings/` are read in place, never copied.
+- Chat replay and "Most replayed" download in parallel with the video.
+
+On CPU only, expect about 1 minute of processing per minute of video. Leave it
+running overnight.
 
 ## Troubleshooting
 
@@ -151,18 +196,28 @@ stream takes about 3 hours. Leave it running overnight. With an NVIDIA GPU
   recording instead.
 - **`setup` says the patch no longer applies**: only possible if
   `stack/UPSTREAM_SHA` was changed. Revert it, or regenerate the patch (see below).
-- **Out of disk**: delete old folders in `openshorts/output/` and
-  `openshorts/uploads/`. Your copies in `clips/` are separate.
+- **Out of disk**: the pipeline's working files are in Docker volumes.
+  `.\clipper.ps1 stop`, then `docker volume rm clipper_clipper_output
+  clipper_clipper_uploads` frees them (your copies in `clips/` are separate;
+  run `sync` first). Keep `clipper_clipper_models`, or the models download again.
+- **Install fails with "being used by another process"**: antivirus holding a
+  Docker temp file. `setup` already retries once; click Install again if it
+  still fails. Everything built so far is cached.
+- **GPU not used**: `.\clipper.ps1 doctor` shows the card and `USE_GPU`. Docker
+  Desktop needs the WSL 2 backend (the default) and a current NVIDIA driver.
 
 ## How this repo is built
 
 ```
+Stream Clipper.cmd                        double-click: opens the window (stack/gui.ps1)
 clipper.ps1 / clipper.sh / clipper.cmd   the one command
 stack/UPSTREAM_SHA                        OpenShorts commit we pin and test against
-stack/patches/openshorts.patch            14-line hook into main.py + configurable upload size in app.py
+stack/patches/openshorts.patch            signals hook in main.py, upload size + keys-from-.env in app.py and the dashboard
 stack/overlay/youtube_signals.py          the YouTube signals (copied into openshorts/)
+stack/gui.ps1                             the Windows Forms window
 stack/run_job.py                          submits a job and collects the clips (runs inside the container)
-stack/docker-compose.override.yml         .env, clips/ and recordings/ mounted into the backend
+stack/docker-compose.override.yml         .env, folders, volumes, prod dashboard, localhost-only ports
+stack/nginx.conf                          serves the dashboard and proxies the API
 stack/docker-compose.gpu.yml              NVIDIA build + runtime, used when USE_GPU=1
 stack/env.template                        becomes .env
 tests/                                    python -m unittest discover -s tests
@@ -171,7 +226,13 @@ tests/                                    python -m unittest discover -s tests
 `openshorts/` is fetched by `setup` and git-ignored. To move to a newer
 OpenShorts: put the new commit in `stack/UPSTREAM_SHA`, run `setup`, fix the
 patch if it fails, and regenerate it with
-`git -C openshorts diff -- main.py app.py > stack/patches/openshorts.patch`.
+`git -C openshorts diff -- main.py app.py dashboard/src > stack/patches/openshorts.patch`.
+
+**Keys in the dashboard.** The dashboard normally asks for keys and keeps them
+in the browser. Here `/api/config` hands it the keys from `.env` instead, but
+only with `CLIPPER_LOCAL_KEYS=1`, only to same-origin requests from
+`localhost`, and every port is bound to `127.0.0.1`, so nothing else on the
+network can reach them.
 
 OpenShorts is MIT-licensed, © OpenShorts. Its `cloud/` folder is under a
 separate commercial license and isn't used here: self-hosted mode never turns it

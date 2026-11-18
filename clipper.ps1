@@ -10,6 +10,7 @@ $OsDir = Join-Path $Root "openshorts"
 $UpstreamUrl = "https://github.com/mutonby/openshorts"
 $UpstreamSha = (Get-Content (Join-Path $Root "stack\UPSTREAM_SHA") -Raw).Trim()
 $Api = "http://localhost:8000"
+$Dashboard = "http://localhost:5175/#app"
 if ($null -eq $Rest) { $Rest = @() }
 
 function Say($msg) { Write-Host $msg -ForegroundColor Cyan }
@@ -78,6 +79,25 @@ function Add-Overlay {
     Say "Applied the YouTube-signals patch."
 }
 
+function Get-GpuName {
+    if (-not (Test-Command nvidia-smi)) { return "" }
+    $old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try { $n = (& nvidia-smi --query-gpu=name --format=csv,noheader 2>$null | Select-Object -First 1) }
+    finally { $ErrorActionPreference = $old }
+    if ($LASTEXITCODE -ne 0 -or -not $n) { return "" }
+    return "$n".Trim()
+}
+
+function Set-EnvValue($name, $value) {
+    $file = Join-Path $Root ".env"
+    $found = $false
+    $lines = @(Get-Content $file | ForEach-Object {
+        if ($_ -match "^$name=") { $found = $true; "$name=$value" } else { $_ }
+    })
+    if (-not $found) { $lines += "$name=$value" }
+    [IO.File]::WriteAllLines($file, [string[]]$lines)
+}
+
 function Initialize-Env {
     foreach ($d in @("clips", "recordings")) {
         $p = Join-Path $Root $d
@@ -87,6 +107,8 @@ function Initialize-Env {
     if (-not (Test-Path $envFile)) {
         Copy-Item (Join-Path $Root "stack\env.template") $envFile
         Say "Created .env - open it (notepad .env) and paste your GEMINI_API_KEY."
+        $gpu = Get-GpuName
+        if ($gpu) { Set-EnvValue "USE_GPU" "1"; Say "Found $gpu - GPU mode on (USE_GPU=1)." }
     }
 }
 
@@ -118,6 +140,21 @@ function Invoke-Job([string[]]$Arguments) {
     exit $LASTEXITCODE
 }
 
+function Invoke-Build {
+    # Docker Desktop on Windows sometimes fails right after a finished build,
+    # renaming its own temp metadata file ("being used by another process",
+    # usually antivirus). Every layer is cached by then, so one retry is cheap.
+    $a = (Get-ComposeArgs) + @("build")
+    & docker @a
+    if ($LASTEXITCODE -eq 0) { return }
+    Say "The build reported an error; retrying once (cached, fast)..."
+    Invoke-Native "docker" $a
+}
+
+function Start-Stack {
+    Invoke-Compose @("up", "-d", "--remove-orphans"); Wait-Healthy
+}
+
 function Get-ContainerPath($src) {
     $abs = (Resolve-Path $src).Path
     $rec = (Resolve-Path (Join-Path $Root "recordings")).Path
@@ -138,11 +175,14 @@ function Show-Usage {
 clipper - stream -> vertical shorts, locally, no watermark.
 
   .\clipper.ps1 setup              download OpenShorts, apply the patch, build (first time / after update)
-  .\clipper.ps1 start              start the pipeline + dashboard (http://localhost:5175)
+  .\clipper.ps1 gui                point-and-click window (same as double-clicking "Stream Clipper.cmd")
+  .\clipper.ps1 start              start the pipeline + dashboard
+  .\clipper.ps1 open               open the dashboard (http://localhost:5175/#app)
   .\clipper.ps1 run <url|file> [--clips N] [--min S] [--max S]
                                    clip a YouTube VOD link or a local OBS recording
   .\clipper.ps1 post <job> <n> [--platforms tiktok,youtube,instagram] [--schedule ISO]
   .\clipper.ps1 jobs               list the clip folders in clips\
+  .\clipper.ps1 sync               copy clips of jobs made in the dashboard into clips\
   .\clipper.ps1 logs               follow the backend log
   .\clipper.ps1 stop               stop everything
   .\clipper.ps1 update             pull this repo and rebuild
@@ -157,17 +197,19 @@ switch ($Command) {
         if ((Invoke-Quiet "docker" @("info")) -ne 0) { Die "Docker is installed but not running. Start Docker Desktop." }
         Sync-Upstream; Add-Overlay; Initialize-Env
         Say "Building the images (the first build downloads several GB, 10-30 min)..."
-        Invoke-Compose @("build")
-        Invoke-Compose @("up", "-d")
-        Wait-Healthy
-        Say "Setup done. Dashboard: http://localhost:5175"
+        if ((Get-EnvValue "USE_GPU") -ne "1" -and (Get-GpuName)) {
+            Say "Tip: this PC has an NVIDIA GPU. Set USE_GPU=1 in .env and run setup again: several times faster."
+        }
+        Invoke-Build
+        Start-Stack
+        Say "Setup done. Dashboard: $Dashboard"
         if (-not (Get-EnvValue "GEMINI_API_KEY")) { Say "Next: put GEMINI_API_KEY in .env, then .\clipper.ps1 start" }
     }
     "start" {
         if (-not (Test-Path (Join-Path $OsDir ".git"))) { Die "run .\clipper.ps1 setup first." }
         Initialize-Env; Add-Overlay
-        Invoke-Compose @("up", "-d"); Wait-Healthy
-        Say "Dashboard: http://localhost:5175"
+        Start-Stack
+        Say "Dashboard: $Dashboard"
     }
     "stop" { Invoke-Compose @("down") }
     "logs" { Invoke-Compose @("logs", "-f", "--tail", "200", "backend") }
@@ -180,11 +222,17 @@ switch ($Command) {
         if ($Rest.Count -gt 1) { $more = $Rest[1..($Rest.Count - 1)] }
         if (Test-Path -LiteralPath $src -PathType Leaf) { $src = Get-ContainerPath $src }
         elseif ($src -notmatch "^https?://") { Die "$src is neither a URL nor a file." }
-        if (-not (Test-Healthy)) { Invoke-Compose @("up", "-d"); Wait-Healthy }
+        if (-not (Test-Healthy)) { Start-Stack }
         Invoke-Job (@("process", $src) + $more)
     }
     "post" { Invoke-Job (@("post") + $Rest) }
     "jobs" { Invoke-Job @("jobs") }
+    "sync" { Invoke-Job @("sync") }
+    "open" {
+        if (-not (Test-Healthy)) { Start-Stack }
+        Start-Process $Dashboard
+    }
+    "gui" { & powershell -NoProfile -ExecutionPolicy Bypass -STA -File (Join-Path $Root "stack\gui.ps1") }
     "update" {
         Invoke-Native "git" @("-C", $Root, "pull", "--ff-only")
         & (Join-Path $Root "clipper.ps1") setup
@@ -192,8 +240,8 @@ switch ($Command) {
     "doctor" {
         foreach ($c in @("git", "docker")) { if (Test-Command $c) { "ok   $c" } else { "MISS $c" } }
         if ((Invoke-Quiet "docker" @("info")) -eq 0) { "ok   docker running" } else { "MISS docker is not running" }
-        if (Test-Command nvidia-smi) { "gpu  " + (& nvidia-smi --query-gpu=name,memory.total --format=csv,noheader) }
-        else { "info no NVIDIA GPU (CPU mode, slower)" }
+        $gpu = Get-GpuName
+        if ($gpu) { "gpu  $gpu (USE_GPU=$(Get-EnvValue 'USE_GPU'))" } else { "info no NVIDIA GPU (CPU mode, slower)" }
         if (Test-Path (Join-Path $Root ".env")) { "ok   .env" } else { "MISS .env (run setup)" }
         if (Get-EnvValue "GEMINI_API_KEY") { "ok   GEMINI_API_KEY" } else { "MISS GEMINI_API_KEY" }
         if (Get-EnvValue "UPLOAD_POST_API_KEY") { "ok   UPLOAD_POST_API_KEY" } else { "info no UPLOAD_POST_API_KEY (posting off)" }

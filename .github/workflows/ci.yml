@@ -13,6 +13,7 @@ jobs:
       - name: Scripts parse
         run: |
           bash -n clipper.sh
+          pwsh -NoProfile -Command '$e=$null; foreach ($f in "clipper.ps1","stack/gui.ps1") { [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$e); if ($e) { $e; exit 1 } }'
           python -m py_compile stack/run_job.py stack/overlay/youtube_signals.py
       - name: Patch applies to the pinned OpenShorts commit
         run: |
@@ -25,3 +26,11 @@ jobs:
           git -C openshorts apply "$PWD/stack/patches/openshorts.patch"
           cp stack/overlay/youtube_signals.py openshorts/
           python -m py_compile openshorts/main.py openshorts/app.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+      - name: Patched dashboard builds
+        working-directory: openshorts/dashboard
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build

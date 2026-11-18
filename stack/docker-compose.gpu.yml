@@ -1,10 +1,11 @@
-# Added when USE_GPU=1 in .env. Needs an NVIDIA card and, on Windows, Docker
-# Desktop with the WSL 2 backend (GPU support is on by default there).
+# Added when USE_GPU=1 in .env (setup turns it on by itself when it finds an
+# NVIDIA card). Windows: Docker Desktop with the WSL 2 backend, GPU support is
+# on by default there.
 services:
   backend:
     build:
       args:
-        GPU: "1"
+        GPU: "1"          # CUDA libs + the one-pass GPU renderer (osrender)
     deploy:
       resources:
         reservations:
@@ -13,9 +14,17 @@ services:
               count: all
               capabilities: [gpu]
     environment:
+      # Parakeet on the GPU is ~2x faster than Whisper-turbo and falls back to
+      # Whisper by itself for languages outside its 25 European ones.
+      TRANSCRIBE_BACKEND: ${TRANSCRIBE_BACKEND_GPU:-parakeet}
       WHISPER_DEVICE: cuda
-      # int8_float16 fits 4 GB cards (GTX 1650 and up) and is as fast as
-      # float16 on anything older than Volta.
+      # int8_float16 fits 4 GB cards and is as fast as float16 before Volta.
       WHISPER_COMPUTE: ${WHISPER_COMPUTE_GPU:-int8_float16}
       WHISPER_MODEL: ${WHISPER_MODEL_GPU:-large-v3-turbo}
-      FFMPEG_ENCODER: auto
+      FFMPEG_ENCODER: auto  # NVENC when the driver supports it, else x264
+      GPU_RENDER: "1"
+      GPU_DECODE: "1"
+      FFMPEG_GPU_CUT: "1"
+      # One stream at a time gets the whole card; a second job queues.
+      MAX_CONCURRENT_JOBS: "1"
+      GPU_MIN_FREE_MB: "0"

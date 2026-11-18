@@ -1,5 +1,43 @@
+diff --git a/Dockerfile b/Dockerfile
+index e654a0d..1c496bd 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -14,13 +14,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
+ COPY requirements.txt requirements-billing.txt requirements-cpu.lock requirements-gpu.lock ./
+ RUN python -m venv /opt/venv
+ ENV PATH="/opt/venv/bin:$PATH"
++# stream-clipper: keep downloaded wheels in a BuildKit cache across builds, so
++# a dropped connection mid-build does not mean downloading several GB again.
++ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
+ RUN pip install --no-cache-dir pip==26.3
+ # torch from PyPI bundles ~16 CUDA/triton wheels (several GB) even when nothing
+ # will ever use a GPU. CPU builds take the same versions from PyTorch's CPU
+ # index first (keep the two pins in step with requirements.txt).
+ ARG GPU=0
+-RUN if [ "$GPU" != "1" ]; then \
+-      pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
++RUN --mount=type=cache,target=/root/.cache/pip if [ "$GPU" != "1" ]; then \
++      pip install --index-url https://download.pytorch.org/whl/cpu \
+         torch==2.11.0 torchvision==0.26.0; \
+     fi
+ # Every other Python package comes from a full lock (direct and transitive
+@@ -40,10 +43,11 @@ RUN if [ "$GPU" != "1" ]; then \
+ # on the CPU. So the GPU build writes onnxruntime-gpu again on top (same
+ # version, from the lock) and fails unless the CUDA provider is compiled in.
+ # get_available_providers() lists what the build has, no GPU needed at build time.
+-RUN if [ "$GPU" = "1" ]; then LOCK=requirements-gpu.lock; else LOCK=requirements-cpu.lock; fi \
+- && pip install --no-cache-dir --no-deps -r "$LOCK" \
++RUN --mount=type=cache,target=/root/.cache/pip \
++    if [ "$GPU" = "1" ]; then LOCK=requirements-gpu.lock; else LOCK=requirements-cpu.lock; fi \
++ && pip install --no-deps -r "$LOCK" \
+  && if [ "$GPU" = "1" ]; then \
+-      pip install --no-cache-dir --no-deps --force-reinstall \
++      pip install --no-deps --force-reinstall \
+         "$(grep -E '^onnxruntime-gpu==' requirements-gpu.lock)" \
+       && python -c "import onnxruntime as o, sys; p = o.get_available_providers(); print('onnxruntime providers:', p); sys.exit('CUDAExecutionProvider' not in p)"; \
+     fi \
 diff --git a/app.py b/app.py
-index b42f23b..dc082ac 100644
+index b42f23b..656cbde 100644
 --- a/app.py
 +++ b/app.py
 @@ -50,7 +50,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -11,6 +49,77 @@ index b42f23b..dc082ac 100644
  
  # How TikTok receives our uploads. MEDIA_UPLOAD lands the video in the user's
  # TikTok drafts so they finish the post inside TikTok's own editor; DIRECT_POST
+@@ -5464,9 +5464,30 @@ async def worker_done(job_id: str, request: Request):
+     return {"ok": True}
+ 
+ 
++def _clipper_local_keys(request: Request):
++    """stream-clipper: hand the keys from .env to the dashboard on THIS machine,
++    so nobody has to paste them into the browser too. Self-host only, opt-in
++    (CLIPPER_LOCAL_KEYS=1), and never to another site: CORS is "*" in
++    self-host, so a page elsewhere could fetch this; such a request carries a
++    foreign Origin / Sec-Fetch-Site and gets nothing. The ports are bound to
++    127.0.0.1 by the clipper compose override, so the LAN cannot reach it."""
++    if BILLING_ENABLED or os.environ.get("CLIPPER_LOCAL_KEYS", "") != "1":
++        return None
++    origin = request.headers.get("origin")
++    site = request.headers.get("sec-fetch-site")
++    if site not in (None, "same-origin", "none"):
++        return None
++    if origin and not re.match(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$", origin):
++        return None
++    return {"gemini": os.environ.get("GEMINI_API_KEY", ""),
++            "uploadPost": os.environ.get("UPLOAD_POST_API_KEY", ""),
++            "uploadUser": os.environ.get("UPLOAD_POST_USER", "")}
++
++
+ @app.get("/api/config")
+-async def get_config():
++async def get_config(request: Request):
+     return {
++        "localKeys": _clipper_local_keys(request),
+         "youtubeUrlEnabled": not DISABLE_YOUTUBE_URL,
+         "billingEnabled": BILLING_ENABLED,
+         "googleAuthEnabled": bool(BILLING_ENABLED and cloud.settings.google_auth_enabled),
+diff --git a/dashboard/src/App.jsx b/dashboard/src/App.jsx
+index b25547f..cadb95a 100644
+--- a/dashboard/src/App.jsx
++++ b/dashboard/src/App.jsx
+@@ -287,7 +287,7 @@ const pollJob = async (jobId) => {
+ 
+ function App() {
+   // Cloud auth/billing session (inert when billing is disabled).
+-  const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe, jobRetentionSeconds, localLlm, loading: authLoading } = useAuth();
++  const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe, jobRetentionSeconds, localLlm, localKeys, loading: authLoading } = useAuth();
+   const [showLogin, setShowLogin] = useState(false);
+   const [showTopUp, setShowTopUp] = useState(false);
+   // Free plan: "want the watermark off?" once per job, when the clips land.
+@@ -348,6 +348,13 @@ function App() {
+   });
+ 
+   const [uploadUserId, setUploadUserId] = useState(() => localStorage.getItem('uploadUserId') || '');
++  // stream-clipper: keys from the server's .env fill in whatever is still empty.
++  useEffect(() => {
++    if (!localKeys) return;
++    if (localKeys.gemini) setApiKey(k => k || localKeys.gemini);
++    if (localKeys.uploadPost) setUploadPostKey(k => k || localKeys.uploadPost);
++    if (localKeys.uploadUser) setUploadUserId(u => u || localKeys.uploadUser);
++  }, [localKeys]);
+   const [userProfiles, setUserProfiles] = useState([]); // List of {username, connected: []}
+   // Post-generation social nudge: shown at the results peak until the user
+   // either connects a network or dismisses it. Only 2.7% of cloud users who
+diff --git a/dashboard/src/contexts/AuthContext.jsx b/dashboard/src/contexts/AuthContext.jsx
+index aac94d5..3224fc8 100644
+--- a/dashboard/src/contexts/AuthContext.jsx
++++ b/dashboard/src/contexts/AuthContext.jsx
+@@ -224,6 +224,7 @@ export function AuthProvider({ children }) {
+   const value = {
+     billingEnabled: config.billingEnabled,
+     localLlm: config.localLlm || null,
++    localKeys: config.localKeys || null,
+     googleAuthEnabled: config.googleAuthEnabled,
+     jobRetentionSeconds: config.jobRetentionSeconds || null,
+     loading,
 diff --git a/main.py b/main.py
 index b6b115e..6dd0bd3 100644
 --- a/main.py

@@ -161,6 +161,38 @@ def cmd_post(args):
     print(json.dumps(payload, indent=2))
 
 
+def _already_collected(job_id):
+    tag = f"_{job_id[:8]}"
+    return os.path.isdir(CLIPS_DIR) and any(n.endswith(tag) for n in os.listdir(CLIPS_DIR))
+
+
+def cmd_sync(_args):
+    """Copy clips of jobs started from the dashboard into clips/ (once each)."""
+    jobs = sorted(os.listdir(OUTPUT_DIR)) if os.path.isdir(OUTPUT_DIR) else []
+    copied = 0
+    for job_id in jobs:
+        if job_id.startswith(".") or not os.path.isdir(os.path.join(OUTPUT_DIR, job_id)):
+            continue
+        if _already_collected(job_id):
+            continue
+        status, st = _request("GET", f"/api/status/{job_id}", timeout=30)
+        if status != 200 or (st or {}).get("status") != "completed":
+            continue
+        result = st.get("result") or {}
+        clips = result.get("clips") or []
+        if not clips:
+            continue
+        meta = [n for n in os.listdir(os.path.join(OUTPUT_DIR, job_id))
+                if n.endswith("_metadata.json")]
+        name = meta[0][:-len("_metadata.json")] if meta else job_id
+        if name.startswith(job_id + "_"):
+            name = name[len(job_id) + 1:]
+        print(f"--- {job_id}")
+        _collect(job_id, result, name)
+        copied += 1
+    print(f"{copied} new job(s) copied to clips/." if copied else "clips/ is up to date.")
+
+
 def cmd_jobs(_args):
     names = sorted(os.listdir(CLIPS_DIR)) if os.path.isdir(CLIPS_DIR) else []
     print("\n".join(names) or "no clip folders yet")
@@ -186,6 +218,8 @@ def main():
     b.set_defaults(fn=cmd_post)
     c = sub.add_parser("jobs")
     c.set_defaults(fn=cmd_jobs)
+    d = sub.add_parser("sync")
+    d.set_defaults(fn=cmd_sync)
     args = p.parse_args()
     try:
         args.fn(args)
