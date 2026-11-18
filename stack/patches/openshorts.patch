@@ -1,0 +1,54 @@
+diff --git a/app.py b/app.py
+index b42f23b..dc082ac 100644
+--- a/app.py
++++ b/app.py
+@@ -50,7 +50,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
+ # Configuration
+ # Default to 1 if not set, but user can set higher for powerful servers
+ MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
+-MAX_FILE_SIZE_MB = 2048  # 2GB limit
++MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB", "2048"))  # stream recordings run far past 2GB
+ 
+ # How TikTok receives our uploads. MEDIA_UPLOAD lands the video in the user's
+ # TikTok drafts so they finish the post inside TikTok's own editor; DIRECT_POST
+diff --git a/main.py b/main.py
+index b6b115e..6dd0bd3 100644
+--- a/main.py
++++ b/main.py
+@@ -32,6 +32,7 @@ import layout_picker
+ import llm_backend
+ import yt_account
+ import twitch_signals
++import youtube_signals
+ from clip_selection import (build_transcript_windows, clip_count_targets,
+                             clip_duration_bounds, dedupe_overlapping,
+                             score_batches, shortlist_target,
+@@ -2763,6 +2764,12 @@ if __name__ == '__main__':
+     viewer_clips = []
+     if args.url and not args.skip_analysis and not args.prepare_only:
+         viewer_clips = twitch_signals.viewer_clips_for_job(args.url, 0)
++    # YouTube has no clips API: chat replay + Most-replayed start here (in the
++    # background, during the download); loudness and OBS markers are added from
++    # the file before the pick (youtube_signals.py).
++    moment_signals = youtube_signals.Collector(
++        args.url if (args.url and not viewer_clips and not args.skip_analysis
++                     and not args.prepare_only) else None)
+ 
+     # 1. Get Input Video
+     if args.url:
+@@ -2993,8 +3000,15 @@ if __name__ == '__main__':
+                   f"switching to visual analysis.")
+             transcript = None
+ 
++        extra_signals = moment_signals.collect(input_video, duration, is_url=bool(args.url))
++        if extra_signals:
++            viewer_clips = list(viewer_clips or []) + extra_signals
++
+         # 4. Gemini Analysis (transcript-driven, or vision for silent videos)
+         early_clips = (early_state or {}).get("clips") if early_state else None
++        if extra_signals and early_clips:
++            print("   📈 Re-picking with the moment signals (the early pick ran without them).")
++            early_clips = None
+         if (transcript is not None and early_clips
+                 and transcript is early_state["transcript"]):
+             print("♻️ Using the clips Gemini picked while the video downloaded.")

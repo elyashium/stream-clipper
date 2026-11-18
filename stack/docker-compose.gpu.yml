@@ -1,0 +1,21 @@
+# Added when USE_GPU=1 in .env. Needs an NVIDIA card and, on Windows, Docker
+# Desktop with the WSL 2 backend (GPU support is on by default there).
+services:
+  backend:
+    build:
+      args:
+        GPU: "1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      WHISPER_DEVICE: cuda
+      # int8_float16 fits 4 GB cards (GTX 1650 and up) and is as fast as
+      # float16 on anything older than Volta.
+      WHISPER_COMPUTE: ${WHISPER_COMPUTE_GPU:-int8_float16}
+      WHISPER_MODEL: ${WHISPER_MODEL_GPU:-large-v3-turbo}
+      FFMPEG_ENCODER: auto

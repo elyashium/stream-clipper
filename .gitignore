@@ -1,0 +1,12 @@
+# Fetched by `clipper setup` (pinned in stack/UPSTREAM_SHA)
+/openshorts/
+
+# Secrets
+.env
+
+# Media
+/clips/
+/recordings/
+
+__pycache__/
+*.pyc

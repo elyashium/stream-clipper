@@ -1,0 +1,27 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Scripts parse
+        run: |
+          bash -n clipper.sh
+          python -m py_compile stack/run_job.py stack/overlay/youtube_signals.py
+      - name: Patch applies to the pinned OpenShorts commit
+        run: |
+          SHA=$(tr -d '[:space:]' < stack/UPSTREAM_SHA)
+          git init -q openshorts
+          git -C openshorts remote add origin https://github.com/mutonby/openshorts
+          git -C openshorts fetch -q --depth 1 origin "$SHA"
+          git -C openshorts checkout -q FETCH_HEAD
+          git -C openshorts apply --check "$PWD/stack/patches/openshorts.patch"
+          git -C openshorts apply "$PWD/stack/patches/openshorts.patch"
+          cp stack/overlay/youtube_signals.py openshorts/
+          python -m py_compile openshorts/main.py openshorts/app.py

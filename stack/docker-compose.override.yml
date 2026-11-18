@@ -1,0 +1,11 @@
+# Layered on top of openshorts/docker-compose.yml by the clipper script.
+# Relative paths resolve from openshorts/ (the compose project directory).
+services:
+  backend:
+    env_file:
+      - path: ../.env
+        required: true
+    volumes:
+      - ../stack:/stack:ro          # run_job.py
+      - ../clips:/clips             # finished clips, copied per job
+      - ../recordings:/recordings   # point OBS's recording path here
